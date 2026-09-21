@@ -33,6 +33,14 @@ body{margin:0;background:var(--concrete);color:var(--ink);font:16px/1.4 "Segoe U
 .top h1{margin:0;font-size:20px;font-weight:700;letter-spacing:.01em}
 .top p{margin:2px 0 0;font-size:13px;color:#aeb7b6}
 .icon{width:44px;height:44px;border-radius:12px;border:1.5px solid #454c50;background:transparent;color:#fff;font-size:20px;cursor:pointer}
+.top .tools{padding-top:0;padding-bottom:14px;gap:10px;justify-content:stretch}
+.tbtn{flex:1;height:46px;border-radius:12px;border:1.5px solid #454c50;background:transparent;color:#fff;font:700 16px "Segoe UI",Roboto,Helvetica,Arial,sans-serif;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
+.tbtn.add{background:var(--safety);border-color:var(--safety);color:var(--asphalt)}
+.tbtn:active{transform:translateY(1px)}
+.tbtn:disabled{opacity:.7;cursor:default}
+.tbtn .ico{font-size:20px;line-height:1;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:no-preference){.tbtn.busy .ico{animation:spin .8s linear infinite}}
 
 /* date row */
 .when{background:#fff;border:1px solid var(--line);border-radius:16px;margin:14px 0;padding:12px}
@@ -105,6 +113,18 @@ b.neg{color:#ff7b7b}
 .inst p:last-child{margin:0}
 .inst .btn{height:48px;font-size:15px;width:100%;flex:none}
 #pimg{width:100%;border-radius:10px;border:1px solid var(--line);display:block;margin-bottom:12px}
+.wdate{margin:-4px 0 10px;font-size:16px;font-weight:600}
+.wstat{margin:0 0 12px;font-size:15px;color:var(--mut);min-height:44px}
+.wstat.bad{color:#b3261e}
+.loader{width:60px;height:60px;margin:4px auto 14px;border-radius:50%;border:6px solid #e0e4e3;border-top-color:var(--asphalt);border-right-color:var(--safety);animation:spin .9s linear infinite;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:700;line-height:1}
+.loader.done{animation:none;border-color:var(--wa);color:var(--wa)}
+.loader.fail{animation:none;border-color:#b3261e;color:#b3261e}
+.syncsheet{max-width:320px;text-align:center}
+.syncsheet h3{margin-bottom:6px}
+.syncsheet .wstat{min-height:0;margin-bottom:4px}
+#welcome .sheet{text-align:center}
+#welcome .btns{justify-content:center}
+@media (prefers-reduced-motion:reduce){.loader{animation-duration:2.4s}}
 a.btn{display:flex;align-items:center;justify-content:center;text-decoration:none}
 
 .toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%);background:var(--asphalt);color:#fff;padding:11px 16px;border-radius:12px;font-size:15px;z-index:30;max-width:90vw;text-align:center;display:none}
@@ -122,6 +142,10 @@ a.btn{display:flex;align-items:center;justify-content:center;text-decoration:non
       <p>Daily stock report</p>
     </div>
     <button class="icon" id="btnSettings" aria-label="Settings">&#9881;</button>
+  </div>
+  <div class="wrap tools">
+    <button class="tbtn add" id="btnAdd"><span class="ico" aria-hidden="true">+</span>Add</button>
+    <button class="tbtn" id="btnRefresh"><span class="ico" aria-hidden="true">&#8635;</span>Refresh</button>
   </div>
 </header>
 
@@ -188,6 +212,29 @@ a.btn{display:flex;align-items:center;justify-content:center;text-decoration:non
   </div>
 </div>
 
+<!-- shown while old data is being updated from the sheet -->
+<div class="ov" id="syncPop">
+  <div class="sheet syncsheet">
+    <div class="loader" id="spLoader"></div>
+    <h3 id="spTitle">Updating old data...</h3>
+    <p class="wstat" id="spText"></p>
+  </div>
+</div>
+
+<!-- shown every time the app opens -->
+<div class="ov" id="welcome">
+  <div class="sheet">
+    <div class="loader" id="wLoader"></div>
+    <h3 id="wTitle">Fuel Station</h3>
+    <p class="wdate" id="wDate"></p>
+    <p class="wstat" id="wStatus"></p>
+    <div class="btns">
+      <button class="btn save" id="wAdd">Add new day</button>
+      <button class="btn ghost" data-close="welcome">Continue</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -195,7 +242,7 @@ a.btn{display:flex;align-items:center;justify-content:center;text-decoration:non
 'use strict';
 
 /* ---------- storage ---------- */
-var KEY_REC='fuelapp_records_v1', KEY_SET='fuelapp_settings_v1';
+var KEY_REC='fuelapp_records_v1', KEY_SET='fuelapp_settings_v1', KEY_DIRTY='fuelapp_unsent_v1';
 function load(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 var storageWarned=false;
 function store(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){if(!storageWarned){storageWarned=true;toast('Cannot save on this browser. Use Share photo and CSV to keep your data.')}return false}}
@@ -218,7 +265,13 @@ var COLS=[
 ];
 
 var records=load(KEY_REC,{});
+var DEFAULT_SHEET_URL='https://script.google.com/macros/s/AKfycbzqXWAet0ybIE--Ov7AFVAy7C91sLbPZjok3iceHnPWPIu2J1HsfpbZo8nU2bktzk-i/exec';
 var settings=Object.assign({station:'My Fuel Station',dipUnit:'cm',oilUnit:'L',sheetUrl:''},load(KEY_SET,{}));
+if(!settings.sheetUrl)settings.sheetUrl=DEFAULT_SHEET_URL;   // always connected to your sheet
+// days changed on this phone that are not sent to the sheet yet (Refresh must not overwrite these)
+var unsent=load(KEY_DIRTY,{});
+function markUnsent(d){if(settings.sheetUrl&&!unsent[d]){unsent[d]=1;store(KEY_DIRTY,unsent)}}
+function markSent(d){if(unsent[d]){delete unsent[d];store(KEY_DIRTY,unsent)}}
 var cur=null, auto=new Set(), timeTouched=false, pendingNext=null;
 var CLOSE2OPEN={};Object.keys(PREFILL).forEach(function(o){CLOSE2OPEN[PREFILL[o]]=o});
 
@@ -345,6 +398,7 @@ function updateNote(){
 }
 function persist(){
   records[cur.date]=Object.assign({},cur);
+  markUnsent(cur.date);
   store(KEY_REC,records);
   renderHistory();
 }
@@ -383,7 +437,7 @@ function carryToNext(openKey,oldVal,newVal){
     if(num(rec[openKey])!==null&&num(rec[openKey])!==num(oldVal))return;
     rec[openKey]=newVal;
   }
-  pendingNext=d;
+  pendingNext=d;markUnsent(d);
   store(KEY_REC,records);renderHistory();
 }
 
@@ -411,19 +465,26 @@ document.querySelectorAll('.ov').forEach(function(o){o.addEventListener('click',
 function push(rec){
   return fetch(settings.sheetUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(flat(rec))});
 }
+function sameVal(a,b){a=(a===undefined||a===null)?'':String(a);b=(b===undefined||b===null)?'':String(b);return a===b||(num(a)!==null&&num(a)===num(b))}
+// Gets days from the sheet: adds new days and updates old days that changed.
+// Days edited on this phone and not sent yet are kept as they are.
 function pull(){
   var u=settings.sheetUrl;
-  return fetch(u+(u.indexOf('?')>-1?'&':'?')+'action=list').then(function(r){return r.json()}).then(function(data){
-    var added=0;
+  return fetch(u+(u.indexOf('?')>-1?'&':'?')+'action=list&_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(function(data){
+    var added=0,updated=0;
     (data.rows||[]).forEach(function(row){
       var d=String(row.date||'').slice(0,10);
-      if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||records[d])return;
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(d))return;
+      var old=records[d];
+      if(old&&unsent[d])return;
       var r=blank(d);r.time=String(row.time||'').slice(0,5);
       INPUTS.forEach(function(k){r[k]=(row[k]===''||row[k]===null||row[k]===undefined)?'':String(row[k])});
-      records[d]=r;added++;
+      if(!old){records[d]=r;added++;return}
+      if(!/^\d{2}:\d{2}$/.test(r.time))r.time=old.time||'';
+      if(INPUTS.some(function(k){return !sameVal(old[k],r[k])})){records[d]=r;updated++}
     });
-    store(KEY_REC,records);
-    return added;
+    if(added||updated)store(KEY_REC,records);
+    return {added:added,updated:updated};
   });
 }
 
@@ -433,11 +494,142 @@ function saveDay(quiet){
   var nextD=pendingNext;pendingNext=null;
   var msg=nextD?'Saved. Tomorrow\'s opening is added.':'Saved on this phone';
   if(!settings.sheetUrl){if(!quiet)toast(msg);return Promise.resolve()}
+  var day=cur.date;
   var jobs=[push(cur)];
-  if(nextD&&records[nextD]&&nextD!==cur.date)jobs.push(push(records[nextD]));
-  return Promise.all(jobs).then(function(){if(!quiet)toast(nextD?'Saved. Tomorrow\'s opening added. Sent to Google Sheet.':'Saved and sent to Google Sheet')}).catch(function(){toast('Saved here. Could not reach Google Sheet.')});
+  if(nextD&&records[nextD]&&nextD!==day)jobs.push(push(records[nextD]));
+  return Promise.all(jobs).then(function(){markSent(day);if(nextD&&nextD!==day)markSent(nextD);if(!quiet)toast(nextD?'Saved. Tomorrow\'s opening added. Sent to Google Sheet.':'Saved and sent to Google Sheet')}).catch(function(){toast('Saved here. Could not reach Google Sheet.')});
 }
 $('#btnSave').addEventListener('click',function(){saveDay(false);updateNote()});
+
+/* ---------- top buttons: Add and Refresh ---------- */
+var CLOSINGS=['d1c','d2c','k1c','k2c','ddc','kdc','p750c','p375c','p180c','p20c','gec','gfc'];
+function hasReadings(r){return !!r&&CLOSINGS.some(function(k){return num(r[k])!==null})}
+
+// Add = open a new empty day (today, or the next day that has no readings yet).
+// The opening boxes are filled from the closing of the day before.
+$('#btnAdd').addEventListener('click',function(){
+  var d=todayStr();
+  while(hasReadings(records[d]))d=addDays(d,1);
+  loadDate(d);
+  window.scrollTo({top:0,behavior:'smooth'});
+  toast('New day: '+shortDate(d)+'. Enter the readings.');
+});
+
+function syncMsg(n){
+  var p=[];
+  if(n.added)p.push(n.added+' new day'+(n.added>1?'s':''));
+  if(n.updated)p.push(n.updated+' day'+(n.updated>1?'s':'')+' updated');
+  return p.length?('From the sheet: '+p.join(', ')+'.'):'';
+}
+
+// if the app was left open past midnight, move to the new today
+var openedOn=todayStr();
+function syncToday(){
+  var t=todayStr();
+  if(t===openedOn)return false;
+  var wasToday=cur&&cur.date===openedOn;
+  openedOn=t;
+  if(wasToday){loadDate(t);return true}
+  return false;
+}
+
+// Refresh = get the newest data from the Google Sheet (new days and changed old days),
+// check for a newer copy of the app, and redraw the screen.
+var refreshing=false,lastRefresh=0,activeJob=null;
+
+// circular loader: '' = spinning, 'done' = tick, 'fail' = warning
+function setLoader(el,state){el.className='loader'+(state?' '+state:'');el.textContent=state==='done'?'\u2713':(state==='fail'?'!':'')}
+function wait(ms){return new Promise(function(r){setTimeout(r,ms)})}
+
+// popup with the circular loader while old data is updated
+var syncTimer;
+function showSyncPop(){
+  clearTimeout(syncTimer);
+  setLoader($('#spLoader'),'');
+  $('#spTitle').textContent='Updating old data...';
+  $('#spText').textContent='Getting the latest days from Google Sheet.';
+  $('#syncPop').classList.add('on');
+}
+function finishSyncPop(res,wasShown){
+  var pop=$('#syncPop');
+  if(wasShown&&!pop.classList.contains('on'))return;   // you closed it yourself
+  clearTimeout(syncTimer);
+  var changed=res.ok&&(res.n.added||res.n.updated);
+  setLoader($('#spLoader'),res.ok?'done':'fail');
+  $('#spTitle').textContent=!res.ok?'Could not update':(changed?'Data updated':'Already up to date');
+  $('#spText').textContent=!res.ok?'Check the internet. Showing the data saved on this phone.':(syncMsg(res.n)||'Nothing new in the sheet.');
+  pop.classList.add('on');
+  syncTimer=setTimeout(function(){pop.classList.remove('on')},res.ok?1800:3200);
+}
+
+function refreshData(manual){
+  if(refreshing)return activeJob;
+  refreshing=true;lastRefresh=Date.now();
+  var b=$('#btnRefresh');
+  b.disabled=true;b.classList.add('busy');
+  var moved=syncToday();
+  if('serviceWorker' in navigator&&location.protocol!=='file:'){
+    navigator.serviceWorker.getRegistration().then(function(r){if(r)r.update()}).catch(function(){});
+  }
+  var welcomeOpen=$('#welcome').classList.contains('on');
+  var pop=manual&&!!settings.sheetUrl&&!welcomeOpen;   // show the loader popup
+  if(pop)showSyncPop();
+  var res={ok:true,n:{added:0,updated:0}};
+  var job=settings.sheetUrl?pull():Promise.resolve({added:0,updated:0});
+  var work=job.then(function(n){
+    res.n=n;
+    if(manual||n.added||n.updated){if(!moved)loadDate(cur.date)}
+    if(manual&&!pop)toast(syncMsg(n)||(settings.sheetUrl?'Everything is up to date.':'Refreshed.'));
+  }).catch(function(){
+    res.ok=false;
+    if(manual&&!pop)toast('Could not reach Google Sheet. Check the internet and the link in Settings.');
+  });
+  activeJob=Promise.all([work,pop?wait(800):null]).then(function(){
+    refreshing=false;b.disabled=false;b.classList.remove('busy');
+    if(pop)finishSyncPop(res,true);
+    // refreshed in the background and old data changed: tell the person
+    else if(!manual&&res.ok&&(res.n.added||res.n.updated)&&!document.querySelector('.ov.on'))finishSyncPop(res,false);
+    return res;
+  });
+  return activeJob;
+}
+$('#btnRefresh').addEventListener('click',function(){refreshData(true)});
+
+/* ---------- popup shown every time the app opens ---------- */
+function openWelcome(){
+  var st=$('#wStatus');
+  $('#wTitle').textContent=settings.station||'Fuel Station';
+  $('#wDate').textContent=longDate(todayStr());
+  st.classList.remove('bad');
+  setLoader($('#wLoader'),settings.sheetUrl?'':'done');
+  st.textContent=settings.sheetUrl?'Updating old data from Google Sheet...':'Your data is saved on this phone.';
+  $('#welcome').classList.add('on');
+  var started=Date.now();
+  refreshData(false).then(function(res){
+    if(!res)return;
+    return wait(Math.max(0,700-(Date.now()-started))).then(function(){return res});
+  }).then(function(res){
+    if(!res)return;
+    var days=Object.keys(records).filter(function(d){return hasReadings(records[d])}).sort();
+    var last=days.length?('Last saved day: '+shortDate(days[days.length-1])+'.'):'No days saved yet.';
+    if(!res.ok){setLoader($('#wLoader'),'fail');st.classList.add('bad');st.textContent='Could not reach Google Sheet. Showing the data saved on this phone. '+last;return}
+    setLoader($('#wLoader'),'done');
+    var m=syncMsg(res.n);
+    st.textContent=(m||(settings.sheetUrl?'Data is up to date.':'Your data is saved on this phone.'))+' '+last;
+  });
+}
+$('#wAdd').addEventListener('click',function(){$('#welcome').classList.remove('on');$('#btnAdd').click()});
+
+// opened again from the background: refresh, and show the popup if you were away 10+ minutes
+var hiddenAt=0;
+document.addEventListener('visibilitychange',function(){
+  if(document.visibilityState==='hidden'){hiddenAt=Date.now();return}
+  var away=hiddenAt?Date.now()-hiddenAt:0;
+  var busyOverlay=document.querySelector('.ov.on');
+  if(away>10*60*1000&&!busyOverlay){syncToday();openWelcome()}
+  else if(Date.now()-lastRefresh>60000)refreshData(false);
+  else syncToday();
+});
 
 /* ---------- photo (canvas) ---------- */
 var FONT='"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
@@ -576,9 +768,9 @@ $('#sSave').addEventListener('click',function(){readSettings();$('#settings').cl
 $('#sPull').addEventListener('click',function(){
   readSettings();
   if(!settings.sheetUrl){toast('Paste your Google Sheet link first');return}
-  toast('Connecting to Google Sheet...');
-  pull().then(function(n){loadDate(cur.date);toast(n?('Added '+n+' day(s) from the sheet'):'Connected. Nothing new in the sheet.')})
-   .catch(function(){toast('Could not connect. Check the link and that access is set to Anyone.')});
+  showSyncPop();
+  Promise.all([pull(),wait(800)]).then(function(r){loadDate(cur.date);finishSyncPop({ok:true,n:r[0]},true)})
+   .catch(function(){finishSyncPop({ok:false},true)});
 });
 $('#sCsv').addEventListener('click',function(){
   var ds=Object.keys(records).sort();
@@ -620,6 +812,7 @@ if(navigator.storage&&navigator.storage.persist){navigator.storage.persist().cat
 
 /* ---------- start ---------- */
 buildForm();refreshUnits();loadDate(todayStr());
+openWelcome();   // popup + newest data every time the app opens
 })();
 </script>
 </body>
