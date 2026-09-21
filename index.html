@@ -92,11 +92,12 @@ b.neg{color:#ff7b7b}
 /* bottom bar */
 .bar{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--line);padding:10px 0 calc(10px + env(safe-area-inset-bottom,0px));z-index:5}
 .bar .wrap{display:flex;gap:10px}
-.btn{flex:1;height:54px;border:0;border-radius:14px;font:700 17px "Segoe UI",Roboto,Helvetica,Arial,sans-serif;cursor:pointer}
+.btn{flex:1;height:54px;border:0;border-radius:14px;font:700 17px "Segoe UI",Roboto,Helvetica,Arial,sans-serif;cursor:pointer;position:relative}
 .btn.save{background:var(--asphalt);color:#fff;flex:.8}
 .btn.share{background:var(--wa);color:#fff}
 .btn.ghost{background:#fff;border:1.5px solid #c7cdcc;color:var(--ink)}
 .btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.75;cursor:default}
 
 /* overlays */
 .ov{position:fixed;inset:0;background:rgba(15,20,22,.65);display:none;align-items:center;justify-content:center;z-index:20;padding:12px}
@@ -221,6 +222,15 @@ a.btn{display:flex;align-items:center;justify-content:center;text-decoration:non
   </div>
 </div>
 
+<!-- shown while today's day is being saved -->
+<div class="ov" id="savePop">
+  <div class="sheet syncsheet">
+    <div class="loader" id="svLoader"></div>
+    <h3 id="svTitle">Saving...</h3>
+    <p class="wstat" id="svText"></p>
+  </div>
+</div>
+
 <!-- shown every time the app opens -->
 <div class="ov" id="welcome">
   <div class="sheet">
@@ -242,10 +252,12 @@ a.btn{display:flex;align-items:center;justify-content:center;text-decoration:non
 'use strict';
 
 /* ---------- storage ---------- */
-var KEY_REC='fuelapp_records_v1', KEY_SET='fuelapp_settings_v1', KEY_DIRTY='fuelapp_unsent_v1';
+var KEY_REC='fuelapp_records_v1', KEY_SET='fuelapp_settings_v1', KEY_DIRTY='fuelapp_unsent_v1', KEY_SYNC='fuelapp_lastsync_v1';
 function load(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 var storageWarned=false;
 function store(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){if(!storageWarned){storageWarned=true;toast('Cannot save on this browser. Use Share photo and CSV to keep your data.')}return false}}
+var lastSyncAt=load(KEY_SYNC,0);          // when the sheet was last pulled successfully (survives app restarts)
+var SYNC_FRESH_MS=2*60*1000;              // skip a fresh pull on open if synced within this long ago
 
 var INPUTS=['d1o','d1c','d2o','d2c','k1o','k1c','k2o','k2c','ddo','ddc','kdo','kdc','p750o','p750c','p375o','p375c','p180o','p180c','p20o','p20c','geo','gfo','gec','gfc'];
 // opening field -> the closing field of the day before
@@ -462,15 +474,22 @@ document.querySelectorAll('[data-close]').forEach(function(b){b.addEventListener
 document.querySelectorAll('.ov').forEach(function(o){o.addEventListener('click',function(e){if(e.target===o)o.classList.remove('on')})});
 
 /* ---------- Google Sheet sync ---------- */
+function fetchTimeout(url,opts,ms){
+  var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;
+  var o=Object.assign({},opts||{});
+  if(ctrl)o.signal=ctrl.signal;
+  var t=ctrl?setTimeout(function(){ctrl.abort()},ms):null;
+  return fetch(url,o).finally(function(){if(t)clearTimeout(t)});
+}
 function push(rec){
-  return fetch(settings.sheetUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(flat(rec))});
+  return fetchTimeout(settings.sheetUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(flat(rec))},15000);
 }
 function sameVal(a,b){a=(a===undefined||a===null)?'':String(a);b=(b===undefined||b===null)?'':String(b);return a===b||(num(a)!==null&&num(a)===num(b))}
 // Gets days from the sheet: adds new days and updates old days that changed.
 // Days edited on this phone and not sent yet are kept as they are.
 function pull(){
   var u=settings.sheetUrl;
-  return fetch(u+(u.indexOf('?')>-1?'&':'?')+'action=list&_='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()}).then(function(data){
+  return fetchTimeout(u+(u.indexOf('?')>-1?'&':'?')+'action=list&_='+Date.now(),{cache:'no-store'},9000).then(function(r){return r.json()}).then(function(data){
     var added=0,updated=0;
     (data.rows||[]).forEach(function(row){
       var d=String(row.date||'').slice(0,10);
@@ -484,6 +503,7 @@ function pull(){
       if(INPUTS.some(function(k){return !sameVal(old[k],r[k])})){records[d]=r;updated++}
     });
     if(added||updated)store(KEY_REC,records);
+    lastSyncAt=Date.now();store(KEY_SYNC,lastSyncAt);
     return {added:added,updated:updated};
   });
 }
@@ -493,13 +513,31 @@ function saveDay(quiet){
   persist();
   var nextD=pendingNext;pendingNext=null;
   var msg=nextD?'Saved. Tomorrow\'s opening is added.':'Saved on this phone';
-  if(!settings.sheetUrl){if(!quiet)toast(msg);return Promise.resolve()}
+  if(!settings.sheetUrl){if(!quiet)toast(msg);return Promise.resolve({ok:true,msg:msg})}
   var day=cur.date;
   var jobs=[push(cur)];
   if(nextD&&records[nextD]&&nextD!==day)jobs.push(push(records[nextD]));
-  return Promise.all(jobs).then(function(){markSent(day);if(nextD&&nextD!==day)markSent(nextD);if(!quiet)toast(nextD?'Saved. Tomorrow\'s opening added. Sent to Google Sheet.':'Saved and sent to Google Sheet')}).catch(function(){toast('Saved here. Could not reach Google Sheet.')});
+  return Promise.all(jobs).then(function(){
+    markSent(day);if(nextD&&nextD!==day)markSent(nextD);
+    var okMsg=nextD?'Saved. Tomorrow\'s opening added. Sent to Google Sheet.':'Saved and sent to Google Sheet';
+    if(!quiet)toast(okMsg);
+    return {ok:true,msg:okMsg};
+  }).catch(function(){
+    var failMsg='Saved here. Could not reach Google Sheet.';
+    if(!quiet)toast(failMsg);
+    return {ok:false,msg:failMsg};
+  });
 }
-$('#btnSave').addEventListener('click',function(){saveDay(false);updateNote()});
+$('#btnSave').addEventListener('click',function(){
+  var btn=$('#btnSave');
+  btn.disabled=true;
+  showSavePop();
+  saveDay(true).then(function(r){
+    btn.disabled=false;
+    finishSavePop(r.ok,r.msg);
+  });
+  updateNote();
+});
 
 /* ---------- top buttons: Add and Refresh ---------- */
 var CLOSINGS=['d1c','d2c','k1c','k2c','ddc','kdc','p750c','p375c','p180c','p20c','gec','gfc'];
@@ -562,6 +600,25 @@ function finishSyncPop(res,wasShown){
   syncTimer=setTimeout(function(){pop.classList.remove('on')},res.ok?1800:3200);
 }
 
+// popup with the circular loader while today's day is being saved
+var saveTimer;
+function showSavePop(){
+  clearTimeout(saveTimer);
+  setLoader($('#svLoader'),'');
+  $('#svTitle').textContent='Saving...';
+  $('#svText').textContent=settings.sheetUrl?'Saving on this phone and sending to Google Sheet.':'Saving on this phone.';
+  $('#savePop').classList.add('on');
+}
+function finishSavePop(ok,msg){
+  var pop=$('#savePop');
+  clearTimeout(saveTimer);
+  setLoader($('#svLoader'),ok?'done':'fail');
+  $('#svTitle').textContent=ok?'Saved':'Could not send';
+  $('#svText').textContent=msg||'';
+  pop.classList.add('on');
+  saveTimer=setTimeout(function(){pop.classList.remove('on')},ok?1400:2600);
+}
+
 function refreshData(manual){
   if(refreshing)return activeJob;
   refreshing=true;lastRefresh=Date.now();
@@ -575,7 +632,8 @@ function refreshData(manual){
   var pop=manual&&!!settings.sheetUrl&&!welcomeOpen;   // show the loader popup
   if(pop)showSyncPop();
   var res={ok:true,n:{added:0,updated:0}};
-  var job=settings.sheetUrl?pull():Promise.resolve({added:0,updated:0});
+  var fresh=!manual&&(Date.now()-lastSyncAt<SYNC_FRESH_MS);   // synced recently: skip the network round trip
+  var job=(settings.sheetUrl&&!fresh)?pull():Promise.resolve({added:0,updated:0});
   var work=job.then(function(n){
     res.n=n;
     if(manual||n.added||n.updated){if(!moved)loadDate(cur.date)}
@@ -584,7 +642,7 @@ function refreshData(manual){
     res.ok=false;
     if(manual&&!pop)toast('Could not reach Google Sheet. Check the internet and the link in Settings.');
   });
-  activeJob=Promise.all([work,pop?wait(800):null]).then(function(){
+  activeJob=Promise.all([work,pop?wait(300):null]).then(function(){
     refreshing=false;b.disabled=false;b.classList.remove('busy');
     if(pop)finishSyncPop(res,true);
     // refreshed in the background and old data changed: tell the person
@@ -607,7 +665,7 @@ function openWelcome(){
   var started=Date.now();
   refreshData(false).then(function(res){
     if(!res)return;
-    return wait(Math.max(0,700-(Date.now()-started))).then(function(){return res});
+    return wait(Math.max(0,250-(Date.now()-started))).then(function(){return res});
   }).then(function(res){
     if(!res)return;
     var days=Object.keys(records).filter(function(d){return hasReadings(records[d])}).sort();
