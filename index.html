@@ -202,18 +202,20 @@ a.btn{display:flex;align-items:center;justify-content:center;text-decoration:non
     </div>
     <label class="fld"><span>Station name (shows on the photo)</span><input type="text" id="sStation" autocomplete="off"></label>
     <label class="fld"><span>Tank dip unit</span><input type="text" id="sDip" placeholder="cm" autocomplete="off"></label>
-    <label class="fld"><span>Google Sheet link (optional)</span><input type="url" id="sUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off"></label>
-    <p class="help">Paste the Web App link from the Google Sheet script. Every "Save day" and "Share photo" then also sends the day to your sheet.</p>
+    <label class="fld"><span>Supabase project URL</span><input type="url" id="sUrl" placeholder="https://xxxxxxxx.supabase.co" autocomplete="off"></label>
+    <label class="fld"><span>Supabase anon / publishable key</span><input type="text" id="sKey" placeholder="eyJ... or sb_publishable_..." autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+    <p class="help">Find both in Supabase: Project Settings, then API. Every "Save day" and "Share photo" then also saves the day to your Supabase database.</p>
     <div class="btns">
       <button class="btn save" id="sSave">Save settings</button>
-      <button class="btn ghost" id="sPull">Get days from Sheet</button>
+      <button class="btn ghost" id="sPull">Get days from Supabase</button>
+      <button class="btn ghost" id="sPushAll">Send all days to Supabase</button>
       <button class="btn ghost" id="sCsv">Download all as CSV</button>
       <button class="btn ghost" data-close="settings">Close</button>
     </div>
   </div>
 </div>
 
-<!-- shown while old data is being updated from the sheet -->
+<!-- shown while old data is being updated from Supabase -->
 <div class="ov" id="syncPop">
   <div class="sheet syncsheet">
     <div class="loader" id="spLoader"></div>
@@ -256,7 +258,7 @@ var KEY_REC='fuelapp_records_v1', KEY_SET='fuelapp_settings_v1', KEY_DIRTY='fuel
 function load(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 var storageWarned=false;
 function store(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){if(!storageWarned){storageWarned=true;toast('Cannot save on this browser. Use Share photo and CSV to keep your data.')}return false}}
-var lastSyncAt=load(KEY_SYNC,0);          // when the sheet was last pulled successfully (survives app restarts)
+var lastSyncAt=load(KEY_SYNC,0);          // when Supabase was last pulled successfully (survives app restarts)
 var SYNC_FRESH_MS=2*60*1000;              // skip a fresh pull on open if synced within this long ago
 
 var INPUTS=['d1o','d1c','d2o','d2c','k1o','k1c','k2o','k2c','ddo','ddc','kdo','kdc','p750o','p750c','p375o','p375c','p180o','p180c','p20o','p20c','geo','gfo','gec','gfc'];
@@ -277,12 +279,17 @@ var COLS=[
 ];
 
 var records=load(KEY_REC,{});
-var DEFAULT_SHEET_URL='https://script.google.com/macros/s/AKfycbzqXWAet0ybIE--Ov7AFVAy7C91sLbPZjok3iceHnPWPIu2J1HsfpbZo8nU2bktzk-i/exec';
-var settings=Object.assign({station:'My Fuel Station',dipUnit:'cm',oilUnit:'L',sheetUrl:''},load(KEY_SET,{}));
-if(!settings.sheetUrl)settings.sheetUrl=DEFAULT_SHEET_URL;   // always connected to your sheet
-// days changed on this phone that are not sent to the sheet yet (Refresh must not overwrite these)
+// Optional: paste your Supabase details here so every phone is connected automatically.
+var DEFAULT_SB_URL='https://bmkmgtelfahdbkecxbok.supabase.co';   // e.g. 'https://abcdxyz.supabase.co'
+var DEFAULT_SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJta21ndGVsZmFoZGJrZWN4Ym9rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE0NDc0NDAsImV4cCI6MjEwNzAyMzQ0MH0.QpI_6pjgyqnnc_Uj0Gc3s8fR6TOloMTp3yJsXtp3XCc';   // anon / publishable key
+var TABLE='fuel_days';
+var settings=Object.assign({station:'My Fuel Station',dipUnit:'cm',oilUnit:'L',sbUrl:'',sbKey:''},load(KEY_SET,{}));
+if(!settings.sbUrl)settings.sbUrl=DEFAULT_SB_URL;
+if(!settings.sbKey)settings.sbKey=DEFAULT_SB_KEY;
+function cloudOn(){return !!(settings.sbUrl&&settings.sbKey)}
+// days changed on this phone that are not sent to Supabase yet (Refresh must not overwrite these)
 var unsent=load(KEY_DIRTY,{});
-function markUnsent(d){if(settings.sheetUrl&&!unsent[d]){unsent[d]=1;store(KEY_DIRTY,unsent)}}
+function markUnsent(d){if(cloudOn()&&!unsent[d]){unsent[d]=1;store(KEY_DIRTY,unsent)}}
 function markSent(d){if(unsent[d]){delete unsent[d];store(KEY_DIRTY,unsent)}}
 var cur=null, auto=new Set(), timeTouched=false, pendingNext=null;
 var CLOSE2OPEN={};Object.keys(PREFILL).forEach(function(o){CLOSE2OPEN[PREFILL[o]]=o});
@@ -431,7 +438,8 @@ $('#list').addEventListener('click',function(e){
   if(del){
     e.stopPropagation();
     var d=del.dataset.del;
-    if(confirm('Delete '+shortDate(d)+'?')){delete records[d];store(KEY_REC,records);if(cur.date===d){loadDate(d)}else{renderHistory()}}
+    if(confirm('Delete '+shortDate(d)+'?')){delete records[d];markSent(d);store(KEY_REC,records);if(cur.date===d){loadDate(d)}else{renderHistory()}
+      if(cloudOn())removeRemote(d).catch(function(){toast('Deleted here, but not from Supabase. Check the internet.')})}
     return;
   }
   var li=e.target.closest('li[data-d]');
@@ -473,7 +481,7 @@ $('#now').addEventListener('click',function(){cur.time=nowHM();$('#time').value=
 document.querySelectorAll('[data-close]').forEach(function(b){b.addEventListener('click',function(){$('#'+b.dataset.close).classList.remove('on')})});
 document.querySelectorAll('.ov').forEach(function(o){o.addEventListener('click',function(e){if(e.target===o)o.classList.remove('on')})});
 
-/* ---------- Google Sheet sync ---------- */
+/* ---------- Supabase sync ---------- */
 function fetchTimeout(url,opts,ms){
   var ctrl=(typeof AbortController!=='undefined')?new AbortController():null;
   var o=Object.assign({},opts||{});
@@ -481,15 +489,28 @@ function fetchTimeout(url,opts,ms){
   var t=ctrl?setTimeout(function(){ctrl.abort()},ms):null;
   return fetch(url,o).finally(function(){if(t)clearTimeout(t)});
 }
-function push(rec){
-  return fetchTimeout(settings.sheetUrl,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(flat(rec))},15000);
+function sbBase(){return settings.sbUrl.replace(/\/+$/,'')+'/rest/v1/'+TABLE}
+function sbHead(extra){
+  var h={apikey:settings.sbKey,'Content-Type':'application/json'};
+  if(/^eyJ/.test(settings.sbKey))h.Authorization='Bearer '+settings.sbKey;   // old-style JWT keys; new sb_publishable keys use apikey only
+  return Object.assign(h,extra||{});
+}
+function sbCheck(r){if(!r.ok)return r.text().then(function(t){throw new Error(r.status+' '+t)});return r}
+function toRow(rec){var o={date:rec.date,time:rec.time||null};INPUTS.forEach(function(k){o[k]=num(rec[k])});return o}
+function pushMany(recs){
+  if(!recs.length)return Promise.resolve();
+  return fetchTimeout(sbBase()+'?on_conflict=date',{method:'POST',headers:sbHead({Prefer:'resolution=merge-duplicates,return=minimal'}),body:JSON.stringify(recs.map(toRow))},20000).then(sbCheck);
+}
+function push(rec){return pushMany([rec])}
+function removeRemote(d){
+  return fetchTimeout(sbBase()+'?date=eq.'+encodeURIComponent(d),{method:'DELETE',headers:sbHead({Prefer:'return=minimal'})},15000).then(sbCheck);
 }
 function sameVal(a,b){a=(a===undefined||a===null)?'':String(a);b=(b===undefined||b===null)?'':String(b);return a===b||(num(a)!==null&&num(a)===num(b))}
-// Gets days from the sheet: adds new days and updates old days that changed.
+// Gets days from Supabase: adds new days and updates old days that changed.
 // Days edited on this phone and not sent yet are kept as they are.
 function pull(){
-  var u=settings.sheetUrl;
-  return fetchTimeout(u+(u.indexOf('?')>-1?'&':'?')+'action=list&_='+Date.now(),{cache:'no-store'},9000).then(function(r){return r.json()}).then(function(data){
+  return fetchTimeout(sbBase()+'?select=*&order=date.desc&limit=1000',{headers:sbHead(),cache:'no-store'},12000).then(sbCheck).then(function(r){return r.json()}).then(function(rows){
+    var data={rows:rows};
     var added=0,updated=0;
     (data.rows||[]).forEach(function(row){
       var d=String(row.date||'').slice(0,10);
@@ -513,17 +534,17 @@ function saveDay(quiet){
   persist();
   var nextD=pendingNext;pendingNext=null;
   var msg=nextD?'Saved. Tomorrow\'s opening is added.':'Saved on this phone';
-  if(!settings.sheetUrl){if(!quiet)toast(msg);return Promise.resolve({ok:true,msg:msg})}
+  if(!cloudOn()){if(!quiet)toast(msg);return Promise.resolve({ok:true,msg:msg})}
   var day=cur.date;
   var jobs=[push(cur)];
   if(nextD&&records[nextD]&&nextD!==day)jobs.push(push(records[nextD]));
   return Promise.all(jobs).then(function(){
     markSent(day);if(nextD&&nextD!==day)markSent(nextD);
-    var okMsg=nextD?'Saved. Tomorrow\'s opening added. Sent to Google Sheet.':'Saved and sent to Google Sheet';
+    var okMsg=nextD?'Saved. Tomorrow\'s opening added. Saved to Supabase.':'Saved and sent to Supabase';
     if(!quiet)toast(okMsg);
     return {ok:true,msg:okMsg};
   }).catch(function(){
-    var failMsg='Saved here. Could not reach Google Sheet.';
+    var failMsg='Saved here. Could not reach Supabase.';
     if(!quiet)toast(failMsg);
     return {ok:false,msg:failMsg};
   });
@@ -557,7 +578,7 @@ function syncMsg(n){
   var p=[];
   if(n.added)p.push(n.added+' new day'+(n.added>1?'s':''));
   if(n.updated)p.push(n.updated+' day'+(n.updated>1?'s':'')+' updated');
-  return p.length?('From the sheet: '+p.join(', ')+'.'):'';
+  return p.length?('From Supabase: '+p.join(', ')+'.'):'';
 }
 
 // if the app was left open past midnight, move to the new today
@@ -571,7 +592,7 @@ function syncToday(){
   return false;
 }
 
-// Refresh = get the newest data from the Google Sheet (new days and changed old days),
+// Refresh = get the newest data from Supabase (new days and changed old days),
 // check for a newer copy of the app, and redraw the screen.
 var refreshing=false,lastRefresh=0,activeJob=null;
 
@@ -585,7 +606,7 @@ function showSyncPop(){
   clearTimeout(syncTimer);
   setLoader($('#spLoader'),'');
   $('#spTitle').textContent='Updating old data...';
-  $('#spText').textContent='Getting the latest days from Google Sheet.';
+  $('#spText').textContent='Getting the latest days from Supabase.';
   $('#syncPop').classList.add('on');
 }
 function finishSyncPop(res,wasShown){
@@ -595,7 +616,7 @@ function finishSyncPop(res,wasShown){
   var changed=res.ok&&(res.n.added||res.n.updated);
   setLoader($('#spLoader'),res.ok?'done':'fail');
   $('#spTitle').textContent=!res.ok?'Could not update':(changed?'Data updated':'Already up to date');
-  $('#spText').textContent=!res.ok?'Check the internet. Showing the data saved on this phone.':(syncMsg(res.n)||'Nothing new in the sheet.');
+  $('#spText').textContent=!res.ok?'Check the internet. Showing the data saved on this phone.':(syncMsg(res.n)||'Nothing new in Supabase.');
   pop.classList.add('on');
   syncTimer=setTimeout(function(){pop.classList.remove('on')},res.ok?1800:3200);
 }
@@ -606,7 +627,7 @@ function showSavePop(){
   clearTimeout(saveTimer);
   setLoader($('#svLoader'),'');
   $('#svTitle').textContent='Saving...';
-  $('#svText').textContent=settings.sheetUrl?'Saving on this phone and sending to Google Sheet.':'Saving on this phone.';
+  $('#svText').textContent=cloudOn()?'Saving on this phone and sending to Supabase.':'Saving on this phone.';
   $('#savePop').classList.add('on');
 }
 function finishSavePop(ok,msg){
@@ -629,18 +650,18 @@ function refreshData(manual){
     navigator.serviceWorker.getRegistration().then(function(r){if(r)r.update()}).catch(function(){});
   }
   var welcomeOpen=$('#welcome').classList.contains('on');
-  var pop=manual&&!!settings.sheetUrl&&!welcomeOpen;   // show the loader popup
+  var pop=manual&&cloudOn()&&!welcomeOpen;   // show the loader popup
   if(pop)showSyncPop();
   var res={ok:true,n:{added:0,updated:0}};
   var fresh=!manual&&(Date.now()-lastSyncAt<SYNC_FRESH_MS);   // synced recently: skip the network round trip
-  var job=(settings.sheetUrl&&!fresh)?pull():Promise.resolve({added:0,updated:0});
+  var job=(cloudOn()&&!fresh)?pull():Promise.resolve({added:0,updated:0});
   var work=job.then(function(n){
     res.n=n;
     if(manual||n.added||n.updated){if(!moved)loadDate(cur.date)}
-    if(manual&&!pop)toast(syncMsg(n)||(settings.sheetUrl?'Everything is up to date.':'Refreshed.'));
+    if(manual&&!pop)toast(syncMsg(n)||(cloudOn()?'Everything is up to date.':'Refreshed.'));
   }).catch(function(){
     res.ok=false;
-    if(manual&&!pop)toast('Could not reach Google Sheet. Check the internet and the link in Settings.');
+    if(manual&&!pop)toast('Could not reach Supabase. Check the internet and the URL and key in Settings.');
   });
   activeJob=Promise.all([work,pop?wait(300):null]).then(function(){
     refreshing=false;b.disabled=false;b.classList.remove('busy');
@@ -659,8 +680,8 @@ function openWelcome(){
   $('#wTitle').textContent=settings.station||'Fuel Station';
   $('#wDate').textContent=longDate(todayStr());
   st.classList.remove('bad');
-  setLoader($('#wLoader'),settings.sheetUrl?'':'done');
-  st.textContent=settings.sheetUrl?'Updating old data from Google Sheet...':'Your data is saved on this phone.';
+  setLoader($('#wLoader'),cloudOn()?'':'done');
+  st.textContent=cloudOn()?'Updating old data from Supabase...':'Your data is saved on this phone.';
   $('#welcome').classList.add('on');
   var started=Date.now();
   refreshData(false).then(function(res){
@@ -670,10 +691,10 @@ function openWelcome(){
     if(!res)return;
     var days=Object.keys(records).filter(function(d){return hasReadings(records[d])}).sort();
     var last=days.length?('Last saved day: '+shortDate(days[days.length-1])+'.'):'No days saved yet.';
-    if(!res.ok){setLoader($('#wLoader'),'fail');st.classList.add('bad');st.textContent='Could not reach Google Sheet. Showing the data saved on this phone. '+last;return}
+    if(!res.ok){setLoader($('#wLoader'),'fail');st.classList.add('bad');st.textContent='Could not reach Supabase. Showing the data saved on this phone. '+last;return}
     setLoader($('#wLoader'),'done');
     var m=syncMsg(res.n);
-    st.textContent=(m||(settings.sheetUrl?'Data is up to date.':'Your data is saved on this phone.'))+' '+last;
+    st.textContent=(m||(cloudOn()?'Data is up to date.':'Your data is saved on this phone.'))+' '+last;
   });
 }
 $('#wAdd').addEventListener('click',function(){$('#welcome').classList.remove('on');$('#btnAdd').click()});
@@ -813,22 +834,34 @@ $('#doShare').addEventListener('click',function(){
 
 /* ---------- settings ---------- */
 $('#btnSettings').addEventListener('click',function(){
-  $('#sStation').value=settings.station;$('#sDip').value=settings.dipUnit;$('#sUrl').value=settings.sheetUrl;
+  $('#sStation').value=settings.station;$('#sDip').value=settings.dipUnit;$('#sUrl').value=settings.sbUrl;$('#sKey').value=settings.sbKey;
   $('#settings').classList.add('on');
 });
 function readSettings(){
   settings.station=$('#sStation').value.trim()||'My Fuel Station';
   settings.dipUnit=$('#sDip').value.trim()||'cm';
-  settings.sheetUrl=$('#sUrl').value.trim();
+  settings.sbUrl=$('#sUrl').value.trim();settings.sbKey=$('#sKey').value.trim();
   store(KEY_SET,settings);refreshUnits();
 }
 $('#sSave').addEventListener('click',function(){readSettings();$('#settings').classList.remove('on');toast('Settings saved')});
 $('#sPull').addEventListener('click',function(){
   readSettings();
-  if(!settings.sheetUrl){toast('Paste your Google Sheet link first');return}
+  if(!cloudOn()){toast('Enter your Supabase URL and key first');return}
   showSyncPop();
   Promise.all([pull(),wait(800)]).then(function(r){loadDate(cur.date);finishSyncPop({ok:true,n:r[0]},true)})
    .catch(function(){finishSyncPop({ok:false},true)});
+});
+$('#sPushAll').addEventListener('click',function(){
+  readSettings();
+  if(!cloudOn()){toast('Enter your Supabase URL and key first');return}
+  var ds=Object.keys(records).filter(function(d){return hasReadings(records[d])||CLOSINGS.concat(['d1o','d2o','k1o','k2o']).some(function(k){return num(records[d][k])!==null})}).sort();
+  if(!ds.length){toast('No saved days to send');return}
+  var b=$('#sPushAll');b.disabled=true;toast('Sending '+ds.length+' days...');
+  var chunks=[];for(var i=0;i<ds.length;i+=200)chunks.push(ds.slice(i,i+200));
+  chunks.reduce(function(p,c){return p.then(function(){return pushMany(c.map(function(d){return records[d]}))})},Promise.resolve())
+   .then(function(){ds.forEach(markSent);toast('Sent '+ds.length+' days to Supabase')})
+   .catch(function(e){toast('Could not send. Check the URL, key and table.')})
+   .then(function(){b.disabled=false});
 });
 $('#sCsv').addEventListener('click',function(){
   var ds=Object.keys(records).sort();
